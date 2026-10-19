@@ -1,0 +1,17 @@
+# Sonar Municipal — execução local / servidor do lab.
+# As portas ficam presas em 127.0.0.1: só processos da própria máquina acessam.
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.16.3
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+      - ./qdrant_snapshots:/qdrant/snapshots
+
+volumes:
+  qdrant_storage:
