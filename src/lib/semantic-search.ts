@@ -36,7 +36,11 @@ export type SearchHit = {
   tipo_label?: string | null;
 };
 
-let embedderPromise: Promise<FeatureExtractionPipeline> | null = null;
+// O Next.js empacota instrumentation e rotas separadamente, cada um com sua cópia deste módulo;
+// guardar o modelo no globalThis evita carregar ~1,5 GB duas vezes no mesmo processo.
+const embedderStore = globalThis as typeof globalThis & {
+  sonarEmbedderPromise?: Promise<FeatureExtractionPipeline> | null;
+};
 let qdrantClient: QdrantClient | null = null;
 
 const ensureNumberArray = (value: unknown): number[] => {
@@ -88,13 +92,15 @@ const toSearchHit = (item: { id: unknown; score?: number; payload?: Payload }): 
 };
 
 const getEmbedder = (): Promise<FeatureExtractionPipeline> => {
-  if (!embedderPromise) {
-    embedderPromise = pipeline("feature-extraction", EMBEDDING_MODEL_ID, { dtype: "fp32" }).catch((error) => {
-      embedderPromise = null;
-      throw error;
-    });
+  if (!embedderStore.sonarEmbedderPromise) {
+    embedderStore.sonarEmbedderPromise = pipeline("feature-extraction", EMBEDDING_MODEL_ID, { dtype: "fp32" }).catch(
+      (error) => {
+        embedderStore.sonarEmbedderPromise = null;
+        throw error;
+      },
+    );
   }
-  return embedderPromise;
+  return embedderStore.sonarEmbedderPromise;
 };
 
 export const warmUpEmbedder = async (): Promise<void> => {
