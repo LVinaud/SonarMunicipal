@@ -36,6 +36,7 @@ de Projetos de Lei Municipais"* (ICMC-USP, 2026).
 - [Variáveis de ambiente](#variáveis-de-ambiente)
 - [Instalação](#instalação)
 - [Uso](#uso)
+- [Execução local com Docker](#execução-local-com-docker-servidor-próprio)
 - [Experimentos e reprodutibilidade](#experimentos-e-reprodutibilidade)
 - [Estrutura do repositório](#estrutura-do-repositório)
 - [Licença, citação e contato](#licença-citação-e-contato)
@@ -85,12 +86,13 @@ O conjunto publicado como parte do TCC é composto por:
 
 ## Arquitetura
 
-A plataforma é uma aplicação **Next.js** que consome dois serviços externos em tempo de execução:
+A plataforma é uma aplicação **Next.js** com duas peças em tempo de execução:
 
 - **Qdrant** — banco vetorial que armazena os embeddings das ações de todos os PLs, na collection
   `projetos-de-lei`; responde às buscas por similaridade de cosseno.
-- **Inference API do Hugging Face** — gera o embedding da consulta do usuário no momento da busca,
-  com o mesmo modelo usado para indexar o corpus.
+- **Modelo de embeddings local** — o próprio servidor Next.js gera o embedding da consulta do
+  usuário (ONNX, em CPU, via `@huggingface/transformers`), com o mesmo modelo usado para indexar o
+  corpus (`multilingual-e5-base`). Não há chamada a serviços pagos.
 
 Os indicadores oficiais (CSV) são lidos do disco e cruzados com os PLs para estimar efeitos. Toda
 a etapa de coleta, transformação e indexação vive em [`experiments/`](experiments/README.MD) e
@@ -123,11 +125,11 @@ e o link público para o PL na origem.
 Crie um arquivo `.env.local` na raiz (use [`.env.example`](.env.example) como base):
 
 ```bash
-HF_API_TOKEN=...
-QDRANT_URL=https://seu-cluster.qdrant.io
-QDRANT_API_KEY=...
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=
 QDRANT_COLLECTION=projetos-de-lei
-HF_MODEL_ID=embaas/sentence-transformers-multilingual-e5-base
+EMBEDDING_MODEL_ID=Xenova/multilingual-e5-base
+EMBEDDING_CACHE_DIR=
 SEARCH_MAX_RESULTS=1000
 
 # Indicadores (dados reais)
@@ -142,10 +144,11 @@ EDUCATION_INDICATOR_VALUE_COL=taxa_matriculas_100k
 
 | Variável | Descrição |
 | --- | --- |
-| `HF_API_TOKEN` | **Obrigatória.** Token da Inference API do Hugging Face, usado para embedar a consulta a cada busca. Sem ele, `/api/search` e `/api/policies` falham. |
-| `QDRANT_URL` / `QDRANT_API_KEY` | Endereço e chave do cluster Qdrant que hospeda a collection de vetores. |
+| `QDRANT_URL` / `QDRANT_API_KEY` | Endereço do Qdrant (local: `http://localhost:6333`, sem chave) ou do cluster no Qdrant Cloud com a chave. |
 | `QDRANT_COLLECTION` | Nome da collection consultada (padrão `projetos-de-lei`). |
-| `HF_MODEL_ID` | Modelo de embeddings; deve ser o mesmo usado na indexação (768 dimensões, cosseno). |
+| `QDRANT_EXACT_SEARCH` | Busca exata, comparando a consulta com todos os vetores (padrão `true`, ~50 ms por consulta). `false` usa o índice aproximado HNSW, mais rápido, mas que perde resultados relevantes neste corpus. |
+| `EMBEDDING_MODEL_ID` | Modelo ONNX que gera o embedding da consulta (padrão `Xenova/multilingual-e5-base`, mesmos pesos do `embaas/sentence-transformers-multilingual-e5-base` usado na indexação). É baixado do Hugging Face na primeira execução, sem token. |
+| `EMBEDDING_CACHE_DIR` | Pasta onde o modelo fica salvo (opcional; padrão dentro de `node_modules`). |
 | `SEARCH_MAX_RESULTS` | Teto de resultados retornados pela busca. |
 | `CRIMINAL_INDICATOR_*` / `EDUCATION_INDICATOR_*` | Caminho do CSV, coluna de município e coluna de valor de cada indicador, além do valor mínimo elegível. |
 
@@ -175,6 +178,62 @@ npm run build
 npm start
 ```
 
+## Execução local com Docker (servidor próprio)
+
+O [`docker-compose.yml`](docker-compose.yml) sobe tudo na própria máquina, sem serviços externos:
+o **Qdrant** (`qdrant/qdrant:v1.16.3`) e o **app** (site + API, com o modelo de embeddings
+embutido na imagem). As duas portas ficam presas em `127.0.0.1`: só processos da mesma máquina
+acessam a API. Memória necessária: ~4 GB livres (medido: app ~2,5 GB, com picos de ~2,9 GB ao
+carregar o modelo; Qdrant ~0,8 GB).
+
+**1. Subir o Qdrant e carregar os dados** (uma vez):
+
+```bash
+docker compose up -d qdrant
+```
+
+Monte o `experiments/data/dataset.npy` e envie-o ao Qdrant local seguindo
+[`experiments/DATASET.MD`](experiments/DATASET.MD) — o notebook de upload já usa
+`http://localhost:6333` por padrão. Confira a contagem de pontos:
+
+```bash
+curl -s http://127.0.0.1:6333/collections/projetos-de-lei | grep -o '"points_count":[0-9]*'
+```
+
+**2. Subir o app:**
+
+```bash
+docker compose up -d --build
+curl -s http://127.0.0.1:3000/api/health
+```
+
+Os dois serviços usam `restart: unless-stopped`: voltam sozinhos após reinício da máquina ou do
+Docker (desde que o Docker inicie com o sistema). Um `docker stop`/`docker kill` manual desativa o
+retorno automático até o próximo `docker compose up -d`.
+
+**3. Levar os dados para outro servidor sem refazer os embeddings** — gere um snapshot da
+collection (~860 MB), baixe-o pela API, copie o arquivo e restaure no destino:
+
+```bash
+# máquina de origem: cria o snapshot (a resposta traz o "name") e baixa o arquivo
+curl -s -X POST http://127.0.0.1:6333/collections/projetos-de-lei/snapshots
+curl -o projetos-de-lei.snapshot http://127.0.0.1:6333/collections/projetos-de-lei/snapshots/<name>
+curl -s -X DELETE http://127.0.0.1:6333/collections/projetos-de-lei/snapshots/<name>  # libera espaço
+
+# servidor de destino (com o Qdrant do compose no ar):
+curl -s -X POST "http://127.0.0.1:6333/collections/projetos-de-lei/snapshots/upload?priority=snapshot" \
+  -F "snapshot=@projetos-de-lei.snapshot"
+```
+
+**Chamando a API a partir de outro projeto no mesmo servidor:**
+
+- processo rodando direto no servidor → `http://127.0.0.1:3000/api/search`;
+- container Docker de outro compose → conecte-o à rede `sonarmunicipal_default` e use
+  `http://app:3000/api/search`.
+
+A chamada deve partir do **servidor** do outro projeto (não do navegador dos visitantes), já que a
+API não fica exposta à internet.
+
 ## Experimentos e reprodutibilidade
 
 Os notebooks e os scripts ficam em [`experiments/`](experiments/README.MD). O caminho recomendado
@@ -193,7 +252,7 @@ parte dos artefatos publicados no Hugging Face; reconstruir tudo do zero é opci
 1. Baixar o dataset publicado [`thiagoambiel/sonar-municipal-pl-actions`](https://huggingface.co/datasets/thiagoambiel/sonar-municipal-pl-actions) (subset `default`).
 2. Gerar os embeddings das ações e montar `experiments/data/dataset.npy`.
 3. Subir os pontos ao Qdrant (collection `projetos-de-lei`) com `upload_data_to_qdrant.ipynb` para
-   **hospedar a plataforma** (exige `HF_API_TOKEN` em tempo de execução).
+   **hospedar a plataforma**.
 
 Para reconstruir do zero (atualizar o corpus com novos PLs ou auditar a coleta): descobrir
 instâncias do sistema SAPL (`tools/sapl_finder`), raspar os PLs (`tools/sapl_scrapper`) e gerar as

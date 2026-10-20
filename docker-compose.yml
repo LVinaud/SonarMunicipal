@@ -2,6 +2,17 @@
 # As portas ficam presas em 127.0.0.1: só processos da própria máquina acessam.
 
 services:
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: projetos-de-lei
+
   qdrant:
     image: qdrant/qdrant:v1.16.3
     restart: unless-stopped
@@ -11,7 +22,6 @@ services:
       QDRANT__TELEMETRY_DISABLED: "true"
     volumes:
       - qdrant_storage:/qdrant/storage
-      - ./qdrant_snapshots:/qdrant/snapshots
 
 volumes:
   qdrant_storage:

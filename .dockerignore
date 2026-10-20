@@ -1,0 +1,11 @@
+.git
+.next
+node_modules
+experiments
+.env
+.env.*
+!.env.example
+Dockerfile
+docker-compose.yml
+**/.vscode
+.DS_Store
