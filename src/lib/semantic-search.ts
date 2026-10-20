@@ -1,8 +1,15 @@
-import { HfInference } from "@huggingface/inference";
+import { env, pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 import { QdrantClient } from "@qdrant/js-client-rest";
 
-const HF_MODEL_ID = process.env.HF_MODEL_ID ?? "embaas/sentence-transformers-multilingual-e5-base";
+// Mesmo modelo da indexação (multilingual-e5-base), em ONNX fp32, executado localmente na CPU.
+const EMBEDDING_MODEL_ID = process.env.EMBEDDING_MODEL_ID ?? "Xenova/multilingual-e5-base";
+if (process.env.EMBEDDING_CACHE_DIR) {
+  env.cacheDir = process.env.EMBEDDING_CACHE_DIR;
+}
 const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION ?? "projetos-de-lei";
+// Busca exata (força bruta) por padrão: neste corpus o índice HNSW perde resultados relevantes
+// (recall de ~70% no top-10 em testes), e a varredura completa custa ~50 ms por consulta.
+const EXACT_SEARCH = process.env.QDRANT_EXACT_SEARCH !== "false";
 const MAX_TOP_K = (() => {
   const raw = Number.parseInt(process.env.SEARCH_MAX_RESULTS ?? "", 10);
   if (Number.isFinite(raw) && raw > 0) return raw;
@@ -29,7 +36,7 @@ export type SearchHit = {
   tipo_label?: string | null;
 };
 
-let hfClient: HfInference | null = null;
+let embedderPromise: Promise<FeatureExtractionPipeline> | null = null;
 let qdrantClient: QdrantClient | null = null;
 
 const ensureNumberArray = (value: unknown): number[] => {
@@ -80,14 +87,18 @@ const toSearchHit = (item: { id: unknown; score?: number; payload?: Payload }): 
   };
 };
 
-const getHfClient = (): HfInference => {
-  if (hfClient) return hfClient;
-  const token = process.env.HF_API_TOKEN;
-  if (!token) {
-    throw new Error("Env HF_API_TOKEN não definido.");
+const getEmbedder = (): Promise<FeatureExtractionPipeline> => {
+  if (!embedderPromise) {
+    embedderPromise = pipeline("feature-extraction", EMBEDDING_MODEL_ID, { dtype: "fp32" }).catch((error) => {
+      embedderPromise = null;
+      throw error;
+    });
   }
-  hfClient = new HfInference(token);
-  return hfClient;
+  return embedderPromise;
+};
+
+export const warmUpEmbedder = async (): Promise<void> => {
+  await embedQuery("aquecimento");
 };
 
 const getQdrantClient = (): QdrantClient => {
@@ -96,7 +107,7 @@ const getQdrantClient = (): QdrantClient => {
   if (!url) {
     throw new Error("Env QDRANT_URL não definido.");
   }
-  qdrantClient = new QdrantClient({ url, apiKey: process.env.QDRANT_API_KEY ?? undefined });
+  qdrantClient = new QdrantClient({ url, apiKey: process.env.QDRANT_API_KEY || undefined });
   return qdrantClient;
 };
 
@@ -106,21 +117,11 @@ export const embedQuery = async (query: string): Promise<number[]> => {
     throw new Error("Query vazia.");
   }
 
-  const response = await getHfClient().featureExtraction({
-    model: HF_MODEL_ID,
-    inputs: `query: ${text}`,
-    parameters: {
-      pooling: "mean",
-      normalize: true,
-      truncate: true,
-      truncation_direction: "right",
-    },
-    options: {
-      wait_for_model: true,
-    },
-  });
+  // O pipeline trunca à direita no limite do modelo (512 tokens), como a Inference API fazia.
+  const embedder = await getEmbedder();
+  const output = await embedder(`query: ${text}`, { pooling: "mean", normalize: true });
 
-  const vector = normalizeVector(ensureNumberArray(response));
+  const vector = normalizeVector(ensureNumberArray(output.tolist()));
   if (vector.length === 0) {
     throw new Error("Falha ao gerar embedding para a query.");
   }
@@ -137,6 +138,7 @@ export const searchProjects = async ({ query, limit }: SearchParams): Promise<Se
     limit: safeLimit,
     with_payload: true,
     with_vector: false,
+    params: { exact: EXACT_SEARCH },
   });
 
   return results.map((item) => toSearchHit(item));

@@ -76,7 +76,7 @@ deles e dispensa a etapa de raspagem:
   `notebooks/SonarMunicipal_Build_the_Base_Action_Recommendation_Dataset.ipynb`. O passo a passo
   está em [DATASET.MD](DATASET.MD).
 - **Hospedar a plataforma** (collection Qdrant `projetos-de-lei`): execute
-  `notebooks/upload_data_to_qdrant.ipynb` e configure `QDRANT_*` + `HF_API_TOKEN` no `.env.local`.
+  `notebooks/upload_data_to_qdrant.ipynb` e configure `QDRANT_*` no `.env.local`.
 
 ### Caminho do zero (opcional) — atualizar ou auditar a coleta
 

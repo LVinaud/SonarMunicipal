@@ -106,8 +106,8 @@ A plataforma Next.js consulta a collection vetorial `projetos-de-lei` no Qdrant.
    cria a collection e faz `upsert` em lotes).
 2. Configure o `.env.local` da raiz do projeto:
    - `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION=projetos-de-lei`;
-   - **`HF_API_TOKEN`** — obrigatório em runtime: a plataforma embeda a consulta do usuário ao
-     vivo pela Inference API do Hugging Face e falha sem o token.
+   - o embedding da consulta é gerado localmente pelo próprio servidor (sem token do Hugging
+     Face); veja `EMBEDDING_MODEL_ID` no README principal.
 
 ---
 
